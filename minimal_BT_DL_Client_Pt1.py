@@ -37,7 +37,7 @@ no_of_pieces        = 0 # Number of pieces the file's divided into
 piece_length        = 0 # Size of each piece
 piece_length_bytes  = 0
 i_have              = None # A bitarray representing which pieces we have
-file_array          = [] # An array of pieces (binary sequences)
+file_array          = b'' # An array of pieces (binary sequences)
 req_block_size_int  = 16384 # Recommended size for requesting blocks of data
 req_block_size_hex  = int(req_block_size_int).to_bytes(4, byteorder='big', signed=True)
 last_block_size_int = 0 # The size of the last block of the file
@@ -52,6 +52,7 @@ list_have_pieces         = [] #list of numbers from "have" messages from a peer
 btdata_backup       = None
 btdata_info_backup  = None
 newline             = "\n" 
+blocks_per_piece    = 0 #number of blocks per piece (piece_length/req_block_size_int)
 
 
 
@@ -72,13 +73,12 @@ def main():
             sys.exit(1)
         else:
             # XXX test print XXX
-            print('trying handshake...')
             print("Try to handshake "+ p.ip +" "+str(p.port))
+            print("Trying to connect to {0}:{1}".format(p.ip, str(p.port)))
             handle = p.handshake(info_hash)
             if handle:
                 request = p.handle_messages(s)
                 if request:
-                    print("returned true on unchoke")
                     print("requesting peer " + str(p.ip))
                     i = 0
                     while i < torrent_data.no_of_pieces:
@@ -106,6 +106,7 @@ def main():
 class TorrentData:
     # class constructor
     def __init__(self, output_filename, total_length, total_length_bytes, piece_length, piece_length_bytes, no_of_pieces, announce_url):
+        global blocks_per_piece
         self.output_filename = output_filename
         self.total_length = total_length
         self.total_length_bytes = total_length_bytes
@@ -113,6 +114,7 @@ class TorrentData:
         self.piece_length_bytes = piece_length_bytes
         self.no_of_pieces = no_of_pieces
         self.announce_url = announce_url
+        blocks_per_piece = self.piece_length/req_block_size_int
 
 class PeerConnection:
     """A class representing the connection to a peer"""
@@ -217,20 +219,8 @@ class PeerConnection:
             # for this, where data is the 4 byte sequence you just read in. FYI,
             # the second argument here indicates that the bytes should be
             # read in the "big-endian" way, meaning most significant on the left.
-            fart = b'\x00\x00@\x00'
-            shart = int.from_bytes(fart, byteorder='big')
             size = int.from_bytes(data, byteorder='big')
-            fucker = b'\x00\x00\x40\x00'
-            fuck = 16384
-            test = fuck.to_bytes(4, byteorder = 'big') 
-            shit = int.from_bytes(fucker, byteorder = 'big')
             ####### TEST PRINTS #########
-            print("size " + str(size))
-            print(test)
-            print(shit)
-            print(fuck)
-            print("shart")
-            print(shart)
             # Now to handle the different size cases:
             #
             # if #SIZE IS BITFIELD SIZE (in bytes, of course)
@@ -254,13 +244,11 @@ class PeerConnection:
                     #
                     # https://pypi.python.org/pypi/bitarray
                     bitlength = size - 1
-                    print("bitlength = " + str(bitlength))
                     self.have = bitarray(endian='big')
                     havebytes = s.recv(bitlength)
                     self.have.frombytes(havebytes)
                     self.have = self.have[:torrent_data.no_of_pieces]
-                    print("Peer have: ")
-                    print(self.have)
+                    print("Peer have: {0}".format(self.have))
                     # you can use the bitarray all() method to determine
                     # if the peer has all the pieces. For this exercise,
                     # we'll keep it simple and only request pieces from
@@ -270,17 +258,17 @@ class PeerConnection:
                     # If the peer does have all the pieces, now would be a good time
                     # to let them know we're interested.
                     if has_whole_file == True:
-                        ######TEST PRINTS######
+                        ###### TEST PRINTS ######
                         print("Interested in peer {0}".format(self.ip))
                         s.send(INTERESTED)
                     else:
-                        print("Incomplete bitfield")
+                        pass
 
 
 
             elif size == 0:
             # SIZE IS ZERO
-                print("keep alive")
+                print("keep-alive")
             # It's a keep alive message. The least interesting message in the
             # world. You can handle this however you think works best for your
             # program, but you should probably handle it somehow.
@@ -322,7 +310,7 @@ class PeerConnection:
                 if messid == 4:
                     piece_index = s.recv(4)
                     piece_index = int.from_bytes(piece_index, byteorder='big')
-                    print("have piece " + str(piece_index))
+                    
                     list_have_pieces.append(piece_index)
             # It's a have. Some clients don't want so send just a bitfield, or
             # maybe not send one at all. Instead, they want to tell you index
@@ -334,8 +322,10 @@ class PeerConnection:
             # that the peer has the pieces you need, so now is also a good time
             # to check their have array, and if they've got all the pieces send
             # them an interested message.
-                    print("num_have_pieces = " + str(num_have_pieces))
-                    print("no_of_pieces = " + str(torrent_data.no_of_pieces))
+            ######## TEST PRINTS ########
+                   # print("have piece " + str(piece_index))
+                    #print("num_have_pieces = " + str(num_have_pieces))
+                    #print("no_of_pieces = " + str(torrent_data.no_of_pieces))
                     if num_have_pieces == torrent_data.no_of_pieces:
                         print("Peer has all the pieces")
                         s.send(INTERESTED)
@@ -345,7 +335,6 @@ class PeerConnection:
 
             elif size == req_block_size_int or size == last_block_size_int+9:
                 #get the id of the message
-                print("This is a block of data")
                 messid = s.recv(1)
                 messid = int.from_bytes(messid, byteorder='big')
             # SIZE IS REQUESTED BLOCK SIZE OR LAST BLOCK SIZE (PLUS 9)
@@ -372,7 +361,9 @@ def get_block(peer, data, sock):
     # build our pieces
 
     # Include any necessary globals
-
+    global total_bytes_gotten
+    global done
+    global file_array
     # We need to know how big the block is going to be (we can get that
     # from 'data'. We then want to double check that the message type is
     # the appropriate value (check the specs for the "piece" message value,
@@ -381,83 +372,100 @@ def get_block(peer, data, sock):
     recv = sock.recv(4)
     len_block = data
     len_piece = int.from_bytes(recv, byteorder='big')
+    lenblock = int.from_bytes(len_block, byteorder='big')
     recv = sock.recv(1)
     messid = int.from_bytes(recv, byteorder='big')
     if messid == 7:#tmp, the message value is correct
         # get the index and offset. Read the description of the "piece" message
         # to see how to do this.
-        print("Processing piece (block) message...")
         index = sock.recv(4)
         offset = sock.recv(4)
-        block = []
-        while len(block) < size:# as long as the block is smaller than the expected block size
+        block = b''
+        while len(block) < lenblock:# as long as the block is smaller than the expected block size
             data = s.recv(1)
-            block.extend(data)
+            block = block + data
             # continue to receive data from your socket and
             # append it to the block. When the block is the size
             # you're expecting, break out of the loop.
             # You can use len() to check the size of the block.
-            if len(block) == size:
+            if len(block) == len_block:
                 break
         # You've got a block. Now add it to the piece it belongs to. I suggest
         # Making an array of pieces which can be accessed by index.
-
+        #temp_array = []
+        #temp_array.append(block)
+        file_array = file_array + block
+        #temp = b''
+        #temp_array = temp.join(temp_array)
+        #temp_array = temp_array
+        #print(temp_array)
+        #file_array.extend(temp_array)
         # It may also be helpful to keep a record of how many bytes you've gotten
         # in total towards the full file.
-
+        total_bytes_gotten = len(block) + total_bytes_gotten
         # He's a little report
-        print("Got a block (size: {0})\tTotal so far: {1} out of {2}".format(len(block), total_bytes_gotten, total_length))
+        print("Got a block (size: {0})\tTotal so far: {1} out of {2}".format(len(block), total_bytes_gotten, torrent_data.total_length))
 
         # If you haven't fully downloaded a piece, you need to get the next block
         # within the piece. The piece index stays the same, but the offset must
         # be shifted to get a later block. This is done by adding the requested
-        # block size to the previous offset.
+        # block size to the previous offset
+        # if the new offset is greater than the length of the piece, you
+        # must be done with that piece. Since we're just getting pieces in
+        # order, you can just go ahead and request the next piece, beginning
+        # with an offset of 0. (Of course, if the next index is greater than
+        # or equal to the total number of pieces, you are finished downloading
+        # and should write your downloaded data to a file).
 
-        if False:# if the resulting offset is still within the same piece,
-            # the same piece with the new offset
-            pass
-
-        else :# if the new offset is greater than the length of the piece, you
-            # must be done with that piece. Since we're just getting pieces in
-            # order, you can just go ahead and request the next piece, beginning
-            # with an offset of 0. (Of course, if the next index is greater than
-            # or equal to the total number of pieces, you are finished downloading
-            # and should write your downloaded data to a file).
-
-            if False:# There's still pieces to be downloaded
-                # Request the first block of the next piece.
-                pass
-            else:
-                # Join all the elements of the downloaded pieces array using
-                # .join()
-                outfile = open(output_filename, 'wb')
-                # Write the full content to the outfile file
-
-                print("Download complete. Wrote file to {0}".format(output_filename))
-                done = True
-                sys.exit(1)
+        if done == False:# There's still pieces to be downloaded
+            # Request the first block of the next piece.
+            index = math.floor(total_bytes_gotten/torrent_data.piece_length)
+            index = int(index)
+            request_piece(peer, sock, index)
+        else:
+            # Join all the elements of the downloaded pieces array using
+            # .join()
+            #print(file_array)
+            output_filename = torrent_data.output_filename
+            #file_array_str = map(str, file_array)
+            #file_contents = b''.join(file_array)
+            file_contents = file_array
+            #print(file_contents)
+            outfile = open(output_filename, 'wb+')
+            #outfile = open(file_contents, 'wb')
+            # Write the full content to the outfile file
+            outfile.write(file_contents)                
+            print("Download complete. Wrote file to {0}".format(output_filename))
+            done = True
+            sys.exit(1)
 
 def request_piece(peer, sock, index):# You'll need access to the socket,
     # the index of the piece you're requesting, and the offset of the block
     # within the piece.
     # Declare any necessary globals here
-    #piece_length
-    #req_block_size_int
-    #piece_length        = 0 # Size of each piece
-    #piece_length_bytes  = 0
+    global total_bytes_gotten
+    global done
     # The piece index and offset will need to be converted to bytes
     # Read the specs for request structure:
     # <len=0013><id=6><index (4 bytes)><begin (4 bytes)><length (4 bytes)>
-    offset = total_bytes_gotten
-    print("offset " + str(offset))
-    length = req_block_size_int
-    print("length " + str(length))
-    #length = length.to_bytes(10, byteorder='big')
-    print("length in bytes")
-    print(length)
-    print("index " + str(index))
+    if index == 0:
+        offset = total_bytes_gotten
+    else:
+       offset = ((total_bytes_gotten/req_block_size_int)%2)*req_block_size_int
+       offset = int(offset)
+    #if it's the last section of the last piece:
+    length_last_block = torrent_data.total_length - total_bytes_gotten
+    if index == torrent_data.no_of_pieces - 1 and length_last_block < req_block_size_int:
+        #adjust the length accordingly
+        length = torrent_data.total_length - total_bytes_gotten
+        done = True
 
-    #last_piece = piece_length > no_of_pieces*
+    else:
+        length = req_block_size_int
+
+    offset = offset.to_bytes(4, byteorder='big')
+    length = length.to_bytes(4, byteorder='big')
+    index = index.to_bytes(4, byteorder='big')
     # Build the request here before sending it into the socket.
     # Length is set as a global at the recommended 16384 bytes. However, the
     # request will be disregarded if there is less data to send than that
@@ -465,22 +473,21 @@ def request_piece(peer, sock, index):# You'll need access to the socket,
     # For this reason, will probably want to build the request slighly
     # differently for the final block case. Keeping track of the total number
     # of bytes you've collected can be helpful for this.
-    # request: <len=0013><id=6><index><begin><length>
-    flag = b'!IB'
-    flag = bencodepy.encode(flag)
-    req = b'\x00\x00\x01\x03\x06\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x40\x00'
-    #req = b'\x00\x00\x01\x03\x06' + index.to_bytes(2, byteorder='big') + offset.to_bytes(4, byteorder='big') + b'\x00\x04\x00\x00'#length.to_bytes(4, byteorder='big')
-
-    print("*** LENGTH PORTION ***")
-    lenmess = str(length).encode()
-    print(lenmess)
-    print("***REQUEST MESSAGE***")
-    print(req)
+    # request: <len=0013><id=6><index><offset><length>
+    start = b'\x00\x00\x00\r\x06'
+    req = start + index + offset + length
+    ################ TEST PRINTS #################
+    #print("***REQUEST MESSAGE***")
+    #print(req)
+    #print("index " + str(index))
+    #print("length: " + str(length))
+    #print("no_of_pieces: ", torrent_data.no_of_pieces)
+    #print("last: ", length_last_block)
+    #print("offset " + str(offset))
 
     # Send the request:
     sock.send(req)
     get_block(peer, length, sock)
-
 
 # this function is used to make a request to the remote tracker server.
 # the tracer server listens for a request of a given torrent
@@ -518,6 +525,7 @@ def tracker_req(btdata, info_hash):
     # print('response content :', response.content)
 
     # decode response text with bencodepy library.
+
     decoded_response_content = bencodepy.decode(response.content)
 
     # XXX test print XXX
