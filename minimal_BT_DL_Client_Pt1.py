@@ -18,6 +18,7 @@ import sys
 import re
 from string import ascii_letters, digits
 import urllib
+import threading
 
 ALPHANUM    = ascii_letters + digits
 INTERESTED  = b'\x00\x00\x00\x01\x02'
@@ -47,12 +48,12 @@ total_length_bytes  = 0
 done                = False # Are we done yet?
 torrent_url         = ''
 announce_url        = ''
-list_have_pieces         = [] #list of numbers from "have" messages from a peer  
 # variable used to store the global bencodepy decoded ordered dict & info
 btdata_backup       = None
 btdata_info_backup  = None
 newline             = "\n" 
 blocks_per_piece    = 0 #number of blocks per piece (piece_length/req_block_size_int)
+peer_field_dict     = {} #keeps the bitfields for each peer
 
 
 
@@ -67,6 +68,16 @@ def main():
     else:
         print('incorrect number of arguments')
 
+    i = 0
+    threads = []
+    for p in peer_connections:
+        name = "Thread " + str(i)
+        print("making threads")
+        temp = myThread(i, name, p, info_hash, peer_connections)
+        threads.append(temp)
+        i = i + 1
+
+    i = 0
     for p in peer_connections:
 
         if done:
@@ -74,24 +85,21 @@ def main():
         else:
             # XXX test print XXX
             print("Try to handshake "+ p.ip +" "+str(p.port))
-            print("Trying to connect to {0}:{1}".format(p.ip, str(p.port)))
-            handle = p.handshake(info_hash)
-            if handle:
-                request = p.handle_messages(s)
-                if request:
-                    print("requesting peer " + str(p.ip))
-                    i = 0
-                    while i < torrent_data.no_of_pieces:
-                        print("requesting piece " + str(i))
-                        request_piece(p, s, i)
-                        i = i + 1
-            # try:
-            #     # print("Try to handshake "+ p.ip.decode() +" "+str(p.port))
-            #     print("Try to handshake "+ p.ip +" "+str(p.port))
-            #     p.handshake(info_hash)
-            # except:
-            #     pass
+            threads[i].start()
+            threads[i].join()
+            #p.handle = p.handshake(info_hash)
+            i = i + 1
 
+    #for p in peer_connections:
+    #    if p.handle:
+    #        request = p.handle_messages(s)
+    #        if request:
+    #            request_piece(p, s, 0)
+
+    i = 0
+    for p in peer_connections:
+
+        i = i + 1
 
         #full featured implementation would require multiple concurrent 
         #requests for different pieces of the file to different peers. 
@@ -99,7 +107,21 @@ def main():
         #involve a bit more bookkeeping
         #This implementation: whole file from a single peer, cycling through the
         #list of peers until we find one that provides with the full file
-
+class myThread (threading.Thread):
+    def __init__(self, threadID, name, peer, infohash, peerconnections):
+        threading.Thread.__init__(self)
+        self.threadID = threadID
+        self.name = name
+        self.peer = peer
+        self.infohash = infohash
+        self.peerconnections = peerconnections
+    def run(self):
+        self.peer.handshake(self.infohash)
+        for p in self.peerconnections:
+            if p.handle:
+                request = p.handle_messages(s)
+                if request:
+                    request_piece(p, s, 0)
 # define a TorrentData object type
 # the purpose of this class is to store data corresponding to the
 # meta-data that's extracted from the .torrent file in an organized way
@@ -114,7 +136,10 @@ class TorrentData:
         self.piece_length_bytes = piece_length_bytes
         self.no_of_pieces = no_of_pieces
         self.announce_url = announce_url
+        self.list_have_pieces = []
         blocks_per_piece = self.piece_length/req_block_size_int
+        self.num_have_pieces = 0
+        self.have_array = bitarray(endian='big')
 
 class PeerConnection:
     """A class representing the connection to a peer"""
@@ -123,6 +148,7 @@ class PeerConnection:
         self.port = port
         self.pid = pid
         self.have = bitarray()
+        self.handle = False
     def handshake(self, info_hash):
         # Declare any necessary globals here
         global s
@@ -181,7 +207,7 @@ class PeerConnection:
             #print(return_hash)
             #print("Response pid")
             #print(resp_pid)
-
+            self.handle = True
             return True
             # If you got a handshake, it's time to handle incoming messages.
 
@@ -221,8 +247,7 @@ class PeerConnection:
             # read in the "big-endian" way, meaning most significant on the left.
             size = int.from_bytes(data, byteorder='big')
             ####### TEST PRINTS #########
-            # Now to handle the different size cases:
-            #
+            # Now to handle the different size cases
             # if #SIZE IS BITFIELD SIZE (in bytes, of course)
             if size == 2:
                 #get the id of the message
@@ -243,12 +268,13 @@ class PeerConnection:
                     # bitarray's frombytes method.
                     #
                     # https://pypi.python.org/pypi/bitarray
-                    bitlength = size - 1
                     self.have = bitarray(endian='big')
-                    havebytes = s.recv(bitlength)
+                    array_len = math.ceil(torrent_data.no_of_pieces/8)
+                    array_len = int(array_len)
+                    havebytes = s.recv(array_len)
                     self.have.frombytes(havebytes)
                     self.have = self.have[:torrent_data.no_of_pieces]
-                    print("Peer have: {0}".format(self.have))
+                    print("Peer bitfield: {0}".format(self.have))
                     # you can use the bitarray all() method to determine
                     # if the peer has all the pieces. For this exercise,
                     # we'll keep it simple and only request pieces from
@@ -257,9 +283,11 @@ class PeerConnection:
                     has_whole_file = all(self.have)
                     # If the peer does have all the pieces, now would be a good time
                     # to let them know we're interested.
+                    peer_field_dict[self.ip] = self.have
                     if has_whole_file == True:
                         ###### TEST PRINTS ######
-                        print("Interested in peer {0}".format(self.ip))
+                        print("Peer has all the pieces")
+                        #print("Interested in peer {0}".format(self.ip))
                         s.send(INTERESTED)
                     else:
                         pass
@@ -310,14 +338,20 @@ class PeerConnection:
                 if messid == 4:
                     piece_index = s.recv(4)
                     piece_index = int.from_bytes(piece_index, byteorder='big')
-                    
-                    list_have_pieces.append(piece_index)
+                    #array_len = math.ceil(torrent_data.no_of_pieces/8)
+                    #array_len = int(array_len)
+                    #have_af.frombytes(havebytes)
+                    #have_array = have_array[:torrent_data.no_of_pieces]
+                    self.have.insert(piece_index, 1)
+                    print("Piece index: {0}".format(piece_index))
+                    print("Peer have: {0}".format(self.have))
+                    self.list_have_pieces.append(piece_index)
             # It's a have. Some clients don't want so send just a bitfield, or
             # maybe not send one at all. Instead, they want to tell you index
             # by index which pieces they have. This message would include a
             # single byte for the message type (have is 4) followed by 4 bytes
             # representing an integer index corresponding to the piece the have.
-                    num_have_pieces = len(list_have_pieces)
+                    self.num_have_pieces = len(self.list_have_pieces)
             # If you get have messages for all the pieces, that also tells you
             # that the peer has the pieces you need, so now is also a good time
             # to check their have array, and if they've got all the pieces send
@@ -326,7 +360,7 @@ class PeerConnection:
                    # print("have piece " + str(piece_index))
                     #print("num_have_pieces = " + str(num_have_pieces))
                     #print("no_of_pieces = " + str(torrent_data.no_of_pieces))
-                    if num_have_pieces == torrent_data.no_of_pieces:
+                    if self.num_have_pieces == torrent_data.no_of_pieces:
                         print("Peer has all the pieces")
                         s.send(INTERESTED)
 
